@@ -365,3 +365,51 @@ def fetch_user_training(api_key: str, *, workout_limit: int = 15) -> HevyTrainin
         data.workout_count = count
 
     return data
+
+
+def fetch_private_user_training(
+    client: Any,
+    *,
+    workout_limit: int = 15,
+) -> HevyTrainingData:
+    """Normalize data fetched through the unsupported Hevy web protocol.
+
+    The private API does not expose the documented exercise-template catalogue,
+    so template names are derived from synchronized routine/workout exercises.
+    """
+    data = HevyTrainingData()
+    raw_routines = client.routines()
+    raw_workouts = client.workouts()
+
+    for source in (*raw_routines, *raw_workouts):
+        for raw_exercise in source.get("exercises", []):
+            if not isinstance(raw_exercise, dict):
+                continue
+            template_id = str(raw_exercise.get("exercise_template_id", ""))
+            if not template_id or template_id in data.exercise_templates:
+                continue
+            data.exercise_templates[template_id] = ExerciseTemplate(
+                id=template_id,
+                title=str(raw_exercise.get("title") or template_id),
+                exercise_type=str(raw_exercise.get("type") or "weight_reps"),
+                primary_muscle_group=str(
+                    raw_exercise.get("primary_muscle_group") or "other"
+                ),
+                secondary_muscle_groups=list(
+                    raw_exercise.get("secondary_muscle_groups") or []
+                ),
+                equipment=raw_exercise.get("equipment"),
+                is_custom=bool(raw_exercise.get("is_custom", False)),
+            )
+
+    data.routines = [
+        _parse_routine(routine, data.exercise_templates) for routine in raw_routines
+    ]
+    data.recent_workouts = [
+        _parse_workout(workout, data.exercise_templates)
+        for workout in raw_workouts[:workout_limit]
+    ]
+    account = client.account()
+    data.username = account.get("username")
+    data.workout_count = client.workout_count()
+    return data

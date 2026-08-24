@@ -18,6 +18,7 @@ export class Settings implements OnInit {
   error = signal<string | null>(null);
 
   hevyKeyInput = '';
+  hevySessionCookie = '';
   hevyStatus = signal<string>('');
   aiStatus = signal<string>('');
   prefStatus = signal<string>('');
@@ -123,6 +124,25 @@ export class Settings implements OnInit {
       },
       error: (err: any) => {
         this.hevyStatus.set(err.error?.detail || 'Verification failed.');
+      }
+    });
+  }
+
+  connectHevySession() {
+    const authCookie = this.hevySessionCookie.trim();
+    if (!authCookie) {
+      this.hevyStatus.set('Paste the auth2.0-token cookie value first.');
+      return;
+    }
+    this.hevyStatus.set('Validating the Hevy web session...');
+    this.http.post('/api/settings/hevy-session', { auth_cookie: authCookie }).subscribe({
+      next: (res: any) => {
+        this.hevySessionCookie = '';
+        this.hevyStatus.set(`✓ Connected${res.username ? ' as ' + res.username : ''}.`);
+        this.loadSettings();
+      },
+      error: (err: any) => {
+        this.hevyStatus.set(err.error?.detail || 'The Hevy web session could not be connected.');
       }
     });
   }

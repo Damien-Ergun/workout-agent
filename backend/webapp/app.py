@@ -30,24 +30,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from authlib.integrations.starlette_client import OAuth
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    FileResponse,
-    HTMLResponse,
-    JSONResponse,
-    RedirectResponse,
-    StreamingResponse,
-)
-from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.sessions import SessionMiddleware
-
 import analytics
 import insights
 import lifestyle
 from ai_provider import AIProvider, resolve_provider
+from authlib.integrations.starlette_client import OAuth
 from config import Config
 from connectors.base import ConnectorContext
 from connectors.builtin import build_builtin_registry
@@ -96,6 +83,16 @@ from dynamic_programme import (
     goal_options,
     serialise_hevy_source,
 )
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
+from fastapi.staticfiles import StaticFiles
 from google_health_auth import build_authorize_url, exchange_code
 from hevy_parser import normalise_name
 from hevy_reader import HevyTrainingData
@@ -103,10 +100,20 @@ from program import (
     CYCLE_WEEKS,
     week_in_cycle,
 )
+from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+
 from webapp import ai_widgets, charts
 
 DB_PATH = os.environ.get("DATABASE_PATH", "workout_agent.db").strip()
 logger = logging.getLogger(__name__)
+
+
+class HevySessionRequest(BaseModel):
+    """URL-encoded value of Hevy's auth2.0-token cookie."""
+
+    auth_cookie: str
 
 
 @lru_cache(maxsize=1)
@@ -884,15 +891,40 @@ def _load_hevy_training_for_user(
 
     keys = get_user_api_keys(user_id, db_path=DB_PATH)
     hevy_key = keys.get("hevy", {}).get("api_key", "").strip()
-    if not hevy_key:
+    private_record = keys.get("hevy_session", {})
+    if not hevy_key and not private_record.get("api_key"):
         raise HTTPException(
             status_code=400,
-            detail="No Hevy API key configured. Add your key in Settings first.",
+            detail="No Hevy connection configured. Connect a web session or add an API key in Settings.",
         )
 
-    from hevy_reader import fetch_user_training
+    from hevy_reader import fetch_private_user_training, fetch_user_training
 
     try:
+        if private_record.get("api_key"):
+            from hevy_private_client import HevyPrivateClient, HevyTokens, _parse_expiry
+
+            extra = private_record.get("extra") or {}
+
+            def persist_tokens(tokens: HevyTokens) -> None:
+                save_user_api_key(
+                    user_id,
+                    "hevy_session",
+                    tokens.access_token,
+                    refresh_token=tokens.refresh_token,
+                    extra={"expires_at": tokens.expires_at.isoformat()},
+                    db_path=DB_PATH,
+                )
+
+            tokens = HevyTokens(
+                access_token=private_record["api_key"],
+                refresh_token=private_record.get("refresh_token") or "",
+                expires_at=_parse_expiry(extra.get("expires_at")),
+            )
+            return fetch_private_user_training(
+                HevyPrivateClient(tokens, on_tokens_rotated=persist_tokens),
+                workout_limit=workout_limit,
+            )
         return fetch_user_training(
             hevy_key,
             workout_limit=workout_limit,
@@ -1137,6 +1169,41 @@ async def verify_hevy_key(request: Request) -> dict[str, Any]:
     return {
         "status": "error",
         "detail": "Could not connect to Hevy. Check the API key.",
+    }
+
+
+@app.post("/api/settings/hevy-session")
+def save_hevy_session(
+    payload: HevySessionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Validate and securely persist an unofficial Hevy web session."""
+    _check_rate_limit(request, limit=3)
+    user_id = _check_api_auth(request)
+
+    from hevy_private_client import HevyPrivateClient, HevyPrivateError, HevyTokens
+
+    try:
+        tokens = HevyTokens.from_cookie(payload.auth_cookie)
+        client = HevyPrivateClient(tokens)
+        account = client.account()
+    except HevyPrivateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # A request may rotate credentials; persist only the client's final triplet.
+    tokens = client.tokens
+    save_user_api_key(
+        user_id,
+        "hevy_session",
+        tokens.access_token,
+        refresh_token=tokens.refresh_token,
+        extra={"expires_at": tokens.expires_at.isoformat()},
+        db_path=DB_PATH,
+    )
+    return {
+        "status": "ok",
+        "username": account.get("username"),
+        "detail": "Hevy web session connected. This unsupported protocol may change without notice.",
     }
 
 
@@ -1521,6 +1588,7 @@ def api_programmes(request: Request) -> JSONResponse:
     active = get_active_programme(user_id, db_path=DB_PATH)
     keys = get_user_api_keys(user_id, db_path=DB_PATH)
     hevy_key = keys.get("hevy", {}).get("api_key", "").strip()
+    has_private_session = bool(keys.get("hevy_session", {}).get("api_key"))
 
     empty_source: dict[str, Any] = {
         "username": None,
@@ -1533,10 +1601,10 @@ def api_programmes(request: Request) -> JSONResponse:
     connection: dict[str, Any]
     source = empty_source
 
-    if not hevy_key:
+    if not hevy_key and not has_private_session:
         connection = {
             "state": "disconnected",
-            "detail": "Add your Hevy API key in Settings to import routines.",
+            "detail": "Connect a Hevy web session or add an API key in Settings to import routines.",
             "username": None,
         }
     else:
@@ -1593,6 +1661,10 @@ def api_settings(request: Request):
             user_keys[p] = {"has_key": True, "masked": masked}
         else:
             user_keys[p] = {"has_key": False, "masked": None}
+    user_keys["hevy_session"] = {
+        "has_key": bool(keys.get("hevy_session", {}).get("api_key")),
+        "masked": None,
+    }
 
     ai_providers = [
         {"id": "gemini", "name": "Google Gemini", "default_model": "gemini-2.5-flash"},
@@ -1624,8 +1696,8 @@ def api_settings(request: Request):
                 "message": status.message,
                 "authorize_supported": connector.capabilities.authorize,
             })
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - isolate optional connectors
+            logger.warning("Could not read connector status for %s: %s", connector.provider, exc)
 
     return JSONResponse(
         jsonable_encoder(

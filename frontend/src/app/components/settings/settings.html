@@ -15,19 +15,37 @@
 <section class="card" id="settings-hevy">
     <div class="card-head">
         <h2>🏋️ Hevy Integration</h2>
-        @if (data.user_keys?.hevy?.has_key) {
+        @if (data.user_keys?.hevy?.has_key || data.user_keys?.hevy_session?.has_key) {
         <span class="status on">Connected</span>
         } @else {
         <span class="status off">Not connected</span>
         }
     </div>
     <p class="muted">
-        Connect your Hevy account so workouts are synced automatically.
-        You need a <strong>Hevy Pro</strong> subscription. Generate an API key at
-        <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener" style="color:var(--accent-2)">hevy.com/settings</a>.
+        Connect without Hevy Pro by importing the <code>auth2.0-token</code> cookie
+        created after you sign in at
+        <a href="https://hevy.com/login" target="_blank" rel="noopener" style="color:var(--accent-2)">hevy.com/login</a>.
+        This uses Hevy's unsupported web protocol and may stop working without notice.
     </p>
 
     <div class="key-form" id="hevy-form">
+        <div class="input-row">
+            <input
+                type="password"
+                class="key-input"
+                placeholder="Paste URL-encoded auth2.0-token cookie value"
+                autocomplete="off"
+                aria-label="Hevy web session cookie"
+                [(ngModel)]="hevySessionCookie"
+            >
+            <button class="btn btn-sm" (click)="connectHevySession()">Connect without Pro</button>
+            @if (data.user_keys?.hevy_session?.has_key) {
+            <button class="btn btn-ghost btn-sm btn-danger" (click)="deleteKey('hevy_session')">Remove session</button>
+            }
+        </div>
+        <p class="muted">The cookie is validated once and stored as encrypted, rotating access and refresh tokens. It is never returned by this API.</p>
+        <details>
+            <summary>Use a developer API key instead</summary>
         <div class="input-row">
             <input
                 type="password"
@@ -47,6 +65,7 @@
             <button class="btn btn-ghost btn-sm btn-danger" (click)="deleteKey('hevy')">Remove</button>
             }
         </div>
+        </details>
         <div id="hevy-status" class="key-status">{{ hevyStatus() }}</div>
     </div>
 </section>
