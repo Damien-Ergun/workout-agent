@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from datetime import datetime, timezone
 
 from hevy_client import (
     get_exercise_templates,
@@ -243,7 +244,47 @@ def _top_set_from_sets(
 
     return best_weight, best_reps
 
+def _parse_hevy_datetime(value: Any) -> datetime | None:
+    """Parse Hevy timestamps from ISO strings or Unix seconds/milliseconds."""
+    if value is None:
+        return None
 
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+
+            # Hevy's web API may return JavaScript timestamps in milliseconds.
+            if abs(timestamp) > 10_000_000_000:
+                timestamp /= 1000.0
+
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        # Also tolerate numeric timestamps encoded as strings.
+        try:
+            timestamp = float(text)
+        except ValueError:
+            timestamp = None
+
+        if timestamp is not None:
+            if abs(timestamp) > 10_000_000_000:
+                timestamp /= 1000.0
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+    
+    
 def _parse_workout(
     raw: dict[str, Any],
     templates: dict[str, ExerciseTemplate],
@@ -277,19 +318,27 @@ def _parse_workout(
             ),
         )
 
-    # Duration.
-    duration = None
-    start = raw.get("start_time")
-    end = raw.get("end_time")
-    if start and end:
-        try:
-            from datetime import datetime
+    # Duration and timestamp normalization.
+    raw_start = raw.get("start_time")
+    raw_end = raw.get("end_time")
 
-            s = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            e = datetime.fromisoformat(end.replace("Z", "+00:00"))
-            duration = int((e - s).total_seconds())
-        except (ValueError, TypeError):
-            pass
+    start_dt = _parse_hevy_datetime(raw_start)
+    end_dt = _parse_hevy_datetime(raw_end)
+
+    start = (
+        start_dt.isoformat().replace("+00:00", "Z")
+        if start_dt is not None
+        else None
+    )
+    end = (
+        end_dt.isoformat().replace("+00:00", "Z")
+        if end_dt is not None
+        else None
+    )
+
+    duration = None
+    if start_dt is not None and end_dt is not None:
+        duration = max(0, int((end_dt - start_dt).total_seconds()))
 
     return CompletedWorkout(
         id=str(raw.get("id", "")),

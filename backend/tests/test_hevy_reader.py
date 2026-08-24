@@ -6,11 +6,40 @@ from unittest.mock import patch
 
 import hevy_reader
 
+
+
 # ---------------------------------------------------------------------------
 # Parse helper tests (pure functions, no mocking needed)
 # ---------------------------------------------------------------------------
 
 
+
+
+def test_parse_hevy_datetime_accepts_iso_string():
+    dt = hevy_reader._parse_hevy_datetime("2026-08-24T12:30:00Z")
+
+    assert dt is not None
+    assert dt.isoformat() == "2026-08-24T12:30:00+00:00"
+
+
+def test_parse_hevy_datetime_accepts_unix_seconds():
+    dt = hevy_reader._parse_hevy_datetime(1756038600)
+
+    assert dt is not None
+    assert dt.tzinfo is not None
+
+
+def test_parse_hevy_datetime_accepts_unix_milliseconds():
+    dt = hevy_reader._parse_hevy_datetime(1756038600000)
+
+    assert dt is not None
+    assert dt.tzinfo is not None
+
+
+def test_parse_hevy_datetime_rejects_invalid_value():
+    assert hevy_reader._parse_hevy_datetime("not-a-date") is None
+    
+    
 def test_parse_exercise_template_minimal() -> None:
     raw: dict[str, object] = {
         "id": "001",
